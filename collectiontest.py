@@ -8,15 +8,25 @@ from watchdog.events import FileSystemEventHandler
 from datetime import datetime, timedelta
 import hashlib
 import re
+import threading
 
-# Galaxy PC credentials
-GALAXY_PC = {
-    'address': '172.18.100.90', 
-    'username': 'SDC5', 
-    'password': 'mnbvcxz123', 
-    'alias': 'Galaxy',
-    'suffix': 'GAL'
-}
+# Production line credentials
+PRODUCTION_LINES = [
+    {
+        'address': '172.18.100.90', 
+        'username': 'SDC5', 
+        'password': 'mnbvcxz123', 
+        'alias': 'Galaxy',
+        'suffix': 'GAL'
+    },
+    {
+        'address': '172.18.100.116', 
+        'username': 'SDC3', 
+        'password': 'Zxcvbnm123', 
+        'alias': 'Jigani',
+        'suffix': 'JIG'
+    }
+]
 
 # Shared folder name
 SHARED_FOLDER_NAME = 'ELimagesnew'
@@ -24,8 +34,9 @@ SHARED_FOLDER_NAME = 'ELimagesnew'
 # Centralized server folder path (where processed images will be stored)
 centralized_folder = "D:\\ELimagesnew\\Data_processed"
 
-# File processing record
+# File processing record (shared across all production lines)
 processed_files = set()
+processed_files_lock = threading.Lock()
 
 def is_network_path_accessible(path, max_retries=3, retry_delay=2):
     """Check if a network path is accessible with retries."""
@@ -120,9 +131,10 @@ def replicate_folder_structure(source_root, dest_root, production_suffix, alias)
             
             # Only process JPEG files
             if file_name.lower().endswith(('.jpg', '.jpeg')):
-                # Skip if already processed
-                if source_file in processed_files:
-                    continue
+                # Skip if already processed (thread-safe)
+                with processed_files_lock:
+                    if source_file in processed_files:
+                        continue
                 
                 # Generate new filename
                 new_filename = generate_new_filename(file_name, source_file, production_suffix)
@@ -131,58 +143,63 @@ def replicate_folder_structure(source_root, dest_root, production_suffix, alias)
                 try:
                     # Copy file with new name
                     shutil.copy2(source_file, dest_file)
-                    processed_files.add(source_file)
+                    with processed_files_lock:
+                        processed_files.add(source_file)
                     processed_count += 1
                     
-                    print(f"Processed: {file_name} -> {new_filename}")
+                    print(f"[{alias}] Processed: {file_name} -> {new_filename}")
                     print(f"  Source: {source_file}")
                     print(f"  Destination: {dest_file}")
                     print(f"  Quality: {'NG' if get_quality_suffix(source_file) == 'Z' else 'Normal'}")
                     print("-" * 50)
                     
                 except Exception as e:
-                    print(f"Error copying {source_file} to {dest_file}: {e}")
+                    print(f"[{alias}] Error copying {source_file} to {dest_file}: {e}")
     
     if processed_count > 0:
-        print(f"Total files processed: {processed_count}")
+        print(f"[{alias}] Total files processed: {processed_count}")
     else:
-        print("No new files to process.")
+        print(f"[{alias}] No new files to process.")
 
 # Event Handler Class
-class GalaxyFileHandler(FileSystemEventHandler):
-    def __init__(self, production_suffix):
-        self.production_suffix = production_suffix
+class ProductionLineFileHandler(FileSystemEventHandler):
+    def __init__(self, production_line):
+        self.production_line = production_line
+        self.production_suffix = production_line['suffix']
+        self.alias = production_line['alias']
 
     def on_created(self, event):
         if not event.is_directory:
             source = event.src_path
             _, file_extension = os.path.splitext(source)
             if file_extension.lower() in ['.jpg', '.jpeg']:
-                if source not in processed_files:
-                    print(f"New JPEG file detected: {source}")
-                    self.process_single_file(source)
+                with processed_files_lock:
+                    if source not in processed_files:
+                        print(f"[{self.alias}] New JPEG file detected: {source}")
+                        self.process_single_file(source)
 
     def on_modified(self, event):
         if not event.is_directory:
             source = event.src_path
             _, file_extension = os.path.splitext(source)
             if file_extension.lower() in ['.jpg', '.jpeg']:
-                if source not in processed_files:
-                    print(f"Modified JPEG file detected: {source}")
-                    self.process_single_file(source)
+                with processed_files_lock:
+                    if source not in processed_files:
+                        print(f"[{self.alias}] Modified JPEG file detected: {source}")
+                        self.process_single_file(source)
 
     def process_single_file(self, source_file):
         """Process a single file that was detected by the file watcher."""
         try:
             # Get relative path from the shared folder root
-            shared_folder_root = f"\\\\{GALAXY_PC['address']}\\{SHARED_FOLDER_NAME}"
+            shared_folder_root = f"\\\\{self.production_line['address']}\\{SHARED_FOLDER_NAME}"
             rel_path = os.path.relpath(os.path.dirname(source_file), shared_folder_root)
             
             # Create destination directory with alias first
             if rel_path == '.':
-                dest_dir = os.path.join(centralized_folder, GALAXY_PC['alias'])
+                dest_dir = os.path.join(centralized_folder, self.alias)
             else:
-                dest_dir = os.path.join(centralized_folder, GALAXY_PC['alias'], rel_path)
+                dest_dir = os.path.join(centralized_folder, self.alias, rel_path)
             
             os.makedirs(dest_dir, exist_ok=True)
             
@@ -193,35 +210,39 @@ class GalaxyFileHandler(FileSystemEventHandler):
             
             # Copy file with new name
             shutil.copy2(source_file, dest_file)
-            processed_files.add(source_file)
+            with processed_files_lock:
+                processed_files.add(source_file)
             
-            print(f"Processed: {original_filename} -> {new_filename}")
+            print(f"[{self.alias}] Processed: {original_filename} -> {new_filename}")
             print(f"  Source: {source_file}")
             print(f"  Destination: {dest_file}")
             print(f"  Quality: {'NG' if get_quality_suffix(source_file) == 'Z' else 'Normal'}")
             print("-" * 50)
             
         except Exception as e:
-            print(f"Error processing {source_file}: {e}")
+            print(f"[{self.alias}] Error processing {source_file}: {e}")
 
 def process_existing_files():
-    """Process all existing files in the Galaxy shared folder."""
-    print("Processing existing files...")
+    """Process all existing files in all production line shared folders."""
+    print("Processing existing files from all production lines...")
     
-    shared_folder_path = f"\\\\{GALAXY_PC['address']}\\{SHARED_FOLDER_NAME}"
-    
-    if not os.path.exists(shared_folder_path):
-        print(f"Galaxy shared folder not accessible: {shared_folder_path}")
-        return
-    
-    replicate_folder_structure(shared_folder_path, centralized_folder, GALAXY_PC['suffix'], GALAXY_PC['alias'])
+    for line in PRODUCTION_LINES:
+        print(f"\n[{line['alias']}] Processing existing files...")
+        shared_folder_path = f"\\\\{line['address']}\\{SHARED_FOLDER_NAME}"
+        
+        if not os.path.exists(shared_folder_path):
+            print(f"[{line['alias']}] Shared folder not accessible: {shared_folder_path}")
+            continue
+        
+        replicate_folder_structure(shared_folder_path, centralized_folder, line['suffix'], line['alias'])
 
 def start_monitoring():
-    """Start monitoring the Galaxy shared folder."""
-    observer = None
+    """Start monitoring all production line shared folders."""
+    observers = []
     running = True
     last_heartbeat = time.time()
     heartbeat_interval = 60  # Print a heartbeat every 60 seconds
+    connected_lines = []
 
     # Handle Ctrl+C
     import signal
@@ -234,39 +255,56 @@ def start_monitoring():
     signal.signal(signal.SIGTERM, signal_handler)
 
     try:
-        # Connect to Galaxy shared folder
-        folder_to_watch = f"\\\\{GALAXY_PC['address']}\\{SHARED_FOLDER_NAME}"
-        print(f"\nAttempting to connect to Galaxy: {folder_to_watch}")
+        # Connect to all production line shared folders
+        for line in PRODUCTION_LINES:
+            folder_to_watch = f"\\\\{line['address']}\\{SHARED_FOLDER_NAME}"
+            print(f"\n[{line['alias']}] Attempting to connect: {folder_to_watch}")
+            
+            if not connect_to_shared_folder(line['address'], line['username'], line['password']):
+                print(f"[{line['alias']}] Failed to connect to {folder_to_watch}. Skipping...")
+                continue
+            
+            # Verify the path is accessible
+            if not is_network_path_accessible(folder_to_watch):
+                print(f"[{line['alias']}] Path {folder_to_watch} is not accessible. Skipping...")
+                continue
+            
+            connected_lines.append(line)
+            print(f"[{line['alias']}] Successfully connected to {folder_to_watch}")
         
-        if not connect_to_shared_folder(GALAXY_PC['address'], GALAXY_PC['username'], GALAXY_PC['password']):
-            print(f"Failed to connect to {folder_to_watch}. Exiting...")
-            return
-        
-        # Verify the path is accessible
-        if not is_network_path_accessible(folder_to_watch):
-            print(f"Path {folder_to_watch} is not accessible. Exiting...")
+        if not connected_lines:
+            print("No production lines could be connected. Exiting...")
             return
         
         # Process existing files before starting to monitor
         process_existing_files()
 
-        # Initialize observer
-        observer = Observer()
-        
-        try:
-            event_handler = GalaxyFileHandler(GALAXY_PC['suffix'])
-            observer.schedule(event_handler, folder_to_watch, recursive=True)
-            print(f"Successfully started monitoring: {folder_to_watch}")
-        except Exception as e:
-            print(f"Error setting up observer for {folder_to_watch}: {e}")
+        # Initialize observers for each connected production line
+        for line in connected_lines:
+            folder_to_watch = f"\\\\{line['address']}\\{SHARED_FOLDER_NAME}"
+            
+            try:
+                observer = Observer()
+                event_handler = ProductionLineFileHandler(line)
+                observer.schedule(event_handler, folder_to_watch, recursive=True)
+                observers.append((observer, line))
+                print(f"[{line['alias']}] Successfully set up monitoring for: {folder_to_watch}")
+            except Exception as e:
+                print(f"[{line['alias']}] Error setting up observer for {folder_to_watch}: {e}")
+
+        if not observers:
+            print("No observers could be set up. Exiting...")
             return
 
-        # Start the observer
-        observer.start()
-        print(f"\nMonitoring started for Galaxy production line")
-        print(f"Watching: {folder_to_watch}")
-        print(f"Output: {centralized_folder}")
-        print(f"Production suffix: {GALAXY_PC['suffix']}")
+        # Start all observers
+        for observer, line in observers:
+            observer.start()
+            print(f"[{line['alias']}] Started monitoring")
+
+        print(f"\nMonitoring started for {len(observers)} production lines:")
+        for _, line in observers:
+            print(f"- {line['alias']} ({line['address']}) - Suffix: {line['suffix']}")
+        print(f"Output directory: {centralized_folder}")
         print("\nPress Ctrl+C to stop monitoring...")
 
         # Main monitoring loop
@@ -276,13 +314,17 @@ def start_monitoring():
                 
                 # Print a heartbeat message periodically
                 if current_time - last_heartbeat >= heartbeat_interval:
-                    print(f"\n[Heartbeat] Galaxy monitoring active at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    active_lines = [line['alias'] for _, line in observers if _.is_alive()]
+                    print(f"\n[Heartbeat] Monitoring active at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    print(f"Active lines: {', '.join(active_lines)}")
                     last_heartbeat = current_time
                 
-                # Check if observer is still alive
-                if not observer.is_alive():
-                    print("\nObserver thread has died. Restarting monitoring...")
-                    break
+                # Check if any observers have died
+                dead_observers = [(obs, line) for obs, line in observers if not obs.is_alive()]
+                if dead_observers:
+                    for obs, line in dead_observers:
+                        print(f"\n[{line['alias']}] Observer thread has died.")
+                    print("Some observers have died. Consider restarting the application.")
                     
                 time.sleep(1)
                 
@@ -297,21 +339,23 @@ def start_monitoring():
         print(f"\nError in monitoring setup: {e}")
     finally:
         print("\nShutting down...")
-        # Stop the observer if it was started
-        if observer and observer.is_alive():
-            print("Stopping observer...")
-            observer.stop()
-            observer.join(timeout=5)
+        # Stop all observers
+        for observer, line in observers:
             if observer.is_alive():
-                print("Warning: Observer did not shut down cleanly")
+                print(f"[{line['alias']}] Stopping observer...")
+                observer.stop()
+                observer.join(timeout=5)
+                if observer.is_alive():
+                    print(f"[{line['alias']}] Warning: Observer did not shut down cleanly")
         
-        # Clean up network connection
-        try:
-            unc = f"\\\\{GALAXY_PC['address']}\\{SHARED_FOLDER_NAME}"
-            win32net.NetUseDel(unc, 0)
-            print(f"Disconnected from {unc}")
-        except Exception as e:
-            print(f"Error disconnecting from Galaxy: {e}")
+        # Clean up network connections
+        for line in PRODUCTION_LINES:
+            try:
+                unc = f"\\\\{line['address']}\\{SHARED_FOLDER_NAME}"
+                win32net.NetUseDel(unc, 0)
+                print(f"[{line['alias']}] Disconnected from {unc}")
+            except Exception as e:
+                print(f"[{line['alias']}] Error disconnecting: {e}")
         
         print("Monitoring stopped.")
 
@@ -319,14 +363,15 @@ if __name__ == "__main__":
     # Create necessary local directories
     os.makedirs(centralized_folder, exist_ok=True)
     
-    print("=" * 60)
-    print("GALAXY PRODUCTION LINE MONITOR")
-    print("=" * 60)
-    print(f"Production: {GALAXY_PC['alias']}")
-    print(f"Suffix: {GALAXY_PC['suffix']}")
-    print(f"Source: \\\\{GALAXY_PC['address']}\\{SHARED_FOLDER_NAME}")
-    print(f"Destination: {centralized_folder}")
-    print("=" * 60)
+    print("=" * 70)
+    print("MULTI PRODUCTION LINE MONITOR")
+    print("=" * 70)
+    print("Production Lines:")
+    for line in PRODUCTION_LINES:
+        print(f"- {line['alias']}: {line['address']} (Suffix: {line['suffix']})")
+    print(f"Shared Folder: {SHARED_FOLDER_NAME}")
+    print(f"Output Directory: {centralized_folder}")
+    print("=" * 70)
     
     # Start the monitoring
     start_monitoring()

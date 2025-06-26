@@ -22,7 +22,7 @@ GALAXY_PC = {
 SHARED_FOLDER_NAME = 'ELimagesnew'
 
 # Centralized server folder path (where processed images will be stored)
-centralized_folder = "D:\\ELimagesprocessed\\Data_processed"
+centralized_folder = "D:\\ELimagesnew\\Data_processed"
 
 # File processing record
 processed_files = set()
@@ -85,7 +85,7 @@ def generate_new_filename(original_filename, source_path, production_suffix):
     # Get quality suffix based on path
     quality_suffix = get_quality_suffix(source_path)
     
-    # Get current timestamp
+    # Get current timestamp (YY format for year)
     timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
     
     # Generate new filename: ORIGINALNAME_PRODUCTION_QUALITY_TIMESTAMP
@@ -93,7 +93,7 @@ def generate_new_filename(original_filename, source_path, production_suffix):
     
     return new_filename
 
-def replicate_folder_structure(source_root, dest_root, production_suffix):
+def replicate_folder_structure(source_root, dest_root, production_suffix, alias):
     """Replicate folder structure and process files."""
     if not os.path.exists(source_root):
         print(f"Source folder does not exist: {source_root}")
@@ -106,11 +106,11 @@ def replicate_folder_structure(source_root, dest_root, production_suffix):
         # Calculate relative path from source root
         rel_path = os.path.relpath(root, source_root)
         
-        # Create corresponding directory in destination
+        # Create corresponding directory in destination with alias first
         if rel_path == '.':
-            dest_dir = dest_root
+            dest_dir = os.path.join(dest_root, alias)
         else:
-            dest_dir = os.path.join(dest_root, rel_path)
+            dest_dir = os.path.join(dest_root, alias, rel_path)
         
         os.makedirs(dest_dir, exist_ok=True)
         
@@ -178,11 +178,11 @@ class GalaxyFileHandler(FileSystemEventHandler):
             shared_folder_root = f"\\\\{GALAXY_PC['address']}\\{SHARED_FOLDER_NAME}"
             rel_path = os.path.relpath(os.path.dirname(source_file), shared_folder_root)
             
-            # Create destination directory
+            # Create destination directory with alias first
             if rel_path == '.':
-                dest_dir = centralized_folder
+                dest_dir = os.path.join(centralized_folder, GALAXY_PC['alias'])
             else:
-                dest_dir = os.path.join(centralized_folder, rel_path)
+                dest_dir = os.path.join(centralized_folder, GALAXY_PC['alias'], rel_path)
             
             os.makedirs(dest_dir, exist_ok=True)
             
@@ -214,7 +214,7 @@ def process_existing_files():
         print(f"Galaxy shared folder not accessible: {shared_folder_path}")
         return
     
-    replicate_folder_structure(shared_folder_path, centralized_folder, GALAXY_PC['suffix'])
+    replicate_folder_structure(shared_folder_path, centralized_folder, GALAXY_PC['suffix'], GALAXY_PC['alias'])
 
 def start_monitoring():
     """Start monitoring the Galaxy shared folder."""

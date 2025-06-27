@@ -40,15 +40,19 @@ PRODUCTION_LINES = [
         'alias': 'Mecury',
         'suffix': 'MERC'
     }
-
 ]
-
 
 # Shared folder name
 SHARED_FOLDER_NAME = 'ELimagesnew'
 
 # Centralized server folder path (where processed images will be stored)
 centralized_folder = "D:\\ELimagesnew\\Data_processed_new"
+
+# Archive base folder path
+archive_base_folder = "D:\\ELimagesnew\\Data_processed_new\\archive"
+
+# Shift duration in hours (configurable)
+shift_duration = 0.01  # 5 seconds for testing purposes
 
 # File processing record (shared across all production lines)
 processed_files = set()
@@ -88,6 +92,29 @@ def connect_to_shared_folder(address, username, password, max_retries=3, retry_d
             if attempt < max_retries - 1:
                 time.sleep(retry_delay)
     return False
+
+def file_exists_in_archive(file_name, alias):
+    """Check if a file with the same name exists in the archive for a specific alias."""
+    alias_archive_path = os.path.join(archive_base_folder, alias)
+    if not os.path.exists(alias_archive_path):
+        return False
+    
+    for root, dirs, files in os.walk(alias_archive_path):
+        if file_name in files:
+            return True
+    return False
+
+def get_file_hash(file_path):
+    """Get MD5 hash of a file."""
+    hasher = hashlib.md5()
+    try:
+        with open(file_path, 'rb') as f:
+            buf = f.read()
+            hasher.update(buf)
+        return hasher.hexdigest()
+    except Exception as e:
+        print(f"Error getting hash for {file_path}: {e}")
+        return None
 
 def get_quality_suffix(file_path):
     """Determine quality suffix based on folder structure."""
@@ -152,6 +179,13 @@ def replicate_folder_structure(source_root, dest_root, production_suffix, alias)
                     if source_file in processed_files:
                         continue
                 
+                # Check if file already exists in archive
+                if file_exists_in_archive(file_name, alias):
+                    print(f"[{alias}] File {file_name} already exists in archive. Skipping...")
+                    with processed_files_lock:
+                        processed_files.add(source_file)
+                    continue
+                
                 # Generate new filename
                 new_filename = generate_new_filename(file_name, source_file, production_suffix)
                 dest_file = os.path.join(dest_dir, new_filename)
@@ -191,8 +225,10 @@ class ProductionLineFileHandler(FileSystemEventHandler):
             if file_extension.lower() in ['.jpg', '.jpeg']:
                 with processed_files_lock:
                     if source not in processed_files:
-                        print(f"[{self.alias}] New JPEG file detected: {source}")
-                        self.process_single_file(source)
+                        original_filename = os.path.basename(source)
+                        if not file_exists_in_archive(original_filename, self.alias):
+                            print(f"[{self.alias}] New JPEG file detected: {source}")
+                            self.process_single_file(source)
 
     def on_modified(self, event):
         if not event.is_directory:
@@ -201,8 +237,10 @@ class ProductionLineFileHandler(FileSystemEventHandler):
             if file_extension.lower() in ['.jpg', '.jpeg']:
                 with processed_files_lock:
                     if source not in processed_files:
-                        print(f"[{self.alias}] Modified JPEG file detected: {source}")
-                        self.process_single_file(source)
+                        original_filename = os.path.basename(source)
+                        if not file_exists_in_archive(original_filename, self.alias):
+                            print(f"[{self.alias}] Modified JPEG file detected: {source}")
+                            self.process_single_file(source)
 
     def process_single_file(self, source_file):
         """Process a single file that was detected by the file watcher."""
@@ -252,12 +290,89 @@ def process_existing_files():
         
         replicate_folder_structure(shared_folder_path, centralized_folder, line['suffix'], line['alias'])
 
+def archive_files():
+    """Archive files from the centralized folder to the archive location."""
+    current_time = datetime.now()
+    print(f"\n{'='*60}")
+    print(f"STARTING ARCHIVAL PROCESS AT {current_time}")
+    print(f"{'='*60}")
+    
+    # Create the directory structure for archiving
+    # year = current_time.strftime('%Y')
+    # month = current_time.strftime('%m')
+    # day = current_time.strftime('%d')
+    
+    archived_count = 0
+    total_files = 0
+    
+    # Process each production line alias folder
+    for line in PRODUCTION_LINES:
+        alias = line['alias']
+        source_folder = os.path.join(centralized_folder, alias)
+        
+        # Create archive path structure: archive/YYYY/MM/DD/alias
+        archive_path = os.path.join(archive_base_folder, alias)
+        
+        # Skip if source folder doesn't exist
+        if not os.path.exists(source_folder):
+            print(f"[{alias}] Source folder not found: {source_folder}")
+            continue
+        
+        # Count files in source folder
+        files_in_source = []
+        for root, dirs, files in os.walk(source_folder):
+            for file_name in files:
+                if file_name.lower().endswith(('.jpg', '.jpeg')):
+                    files_in_source.append(os.path.join(root, file_name))
+        
+        if not files_in_source:
+            print(f"[{alias}] No JPEG files found to archive")
+            continue
+        
+        total_files += len(files_in_source)
+        
+        # Create archive directory if it doesn't exist
+        os.makedirs(archive_path, exist_ok=True)
+        
+        # Move files to archive, preserving folder structure
+        try:
+            files_moved = 0
+            for source_file in files_in_source:
+                # Get relative path from source folder
+                rel_path = os.path.relpath(source_file, source_folder)
+                dest_file = os.path.join(archive_path, rel_path)
+                
+                # Create destination directory if needed
+                dest_dir = os.path.dirname(dest_file)
+                os.makedirs(dest_dir, exist_ok=True)
+                
+                # Move file to archive
+                shutil.move(source_file, dest_file)
+                files_moved += 1
+                print(f"[{alias}] Archived: {os.path.basename(source_file)} -> {archive_path}")
+            
+            archived_count += files_moved
+            print(f"[{alias}] Successfully archived {files_moved} files")
+                
+        except Exception as e:
+            print(f"[{alias}] Error archiving files from {source_folder}: {e}")
+    
+    print(f"\n{'='*60}")
+    if archived_count == 0:
+        print("ARCHIVAL COMPLETED - No new files to archive")
+    else:
+        print(f"ARCHIVAL COMPLETED - {archived_count}/{total_files} files archived successfully")
+    print(f"Archive location: {archive_base_folder}")
+    print(f"{'='*60}\n")
+
 def start_monitoring():
     """Start monitoring all production line shared folders."""
     observers = []
     running = True
     last_heartbeat = time.time()
     heartbeat_interval = 60  # Print a heartbeat every 60 seconds
+    last_archive_check = time.time()
+    archive_check_interval = shift_duration * 3600  # Convert hours to seconds
     connected_lines = []
 
     # Handle Ctrl+C
@@ -321,6 +436,8 @@ def start_monitoring():
         for _, line in observers:
             print(f"- {line['alias']} ({line['address']}) - Suffix: {line['suffix']}")
         print(f"Output directory: {centralized_folder}")
+        print(f"Archive directory: {archive_base_folder}")
+        print(f"Shift duration: {shift_duration} hours")
         print("\nPress Ctrl+C to stop monitoring...")
 
         # Main monitoring loop
@@ -328,12 +445,42 @@ def start_monitoring():
             try:
                 current_time = time.time()
                 
+                # Debug: Show archive timing every 10 seconds
+                if int(current_time) % 10 == 0:
+                    time_until_archive = int((last_archive_check + archive_check_interval) - current_time)
+                    if time_until_archive <= 0:
+                        print(f"[DEBUG] Archive should trigger NOW! ({time_until_archive} seconds)")
+                    else:
+                        print(f"[DEBUG] Archive in {time_until_archive} seconds")
+                
                 # Print a heartbeat message periodically
                 if current_time - last_heartbeat >= heartbeat_interval:
                     active_lines = [line['alias'] for _, line in observers if _.is_alive()]
+                    next_archive = datetime.fromtimestamp(last_archive_check + archive_check_interval)
+                    time_until_archive = int((last_archive_check + archive_check_interval) - current_time)
                     print(f"\n[Heartbeat] Monitoring active at {time.strftime('%Y-%m-%d %H:%M:%S')}")
                     print(f"Active lines: {', '.join(active_lines)}")
+                    print(f"Next archive check: {next_archive.strftime('%Y-%m-%d %H:%M:%S')} (in {time_until_archive} seconds)")
+                    
+                    # Show current file counts in each folder
+                    for line in PRODUCTION_LINES:
+                        alias_folder = os.path.join(centralized_folder, line['alias'])
+                        if os.path.exists(alias_folder):
+                            file_count = 0
+                            for root, dirs, files in os.walk(alias_folder):
+                                file_count += len([f for f in files if f.lower().endswith(('.jpg', '.jpeg'))])
+                            print(f"  {line['alias']}: {file_count} JPEG files pending archive")
+                    
                     last_heartbeat = current_time
+                
+                # Check if it's time to archive files
+                if current_time - last_archive_check >= archive_check_interval:
+                    print(f"\n*** ARCHIVE TRIGGER *** Shift ended at {datetime.now()}. Starting archival process...")
+                    print(f"Time since last archive: {(current_time - last_archive_check):.2f} seconds")
+                    print(f"Archive interval: {archive_check_interval} seconds")
+                    archive_files()
+                    last_archive_check = current_time
+                    print("*** ARCHIVE COMPLETED ***")
                 
                 # Check if any observers have died
                 dead_observers = [(obs, line) for obs, line in observers if not obs.is_alive()]
@@ -378,15 +525,18 @@ def start_monitoring():
 if __name__ == "__main__":
     # Create necessary local directories
     os.makedirs(centralized_folder, exist_ok=True)
+    os.makedirs(archive_base_folder, exist_ok=True)
     
     print("=" * 70)
-    print("MULTI PRODUCTION LINE MONITOR")
+    print("MULTI PRODUCTION LINE MONITOR WITH ARCHIVAL")
     print("=" * 70)
     print("Production Lines:")
     for line in PRODUCTION_LINES:
         print(f"- {line['alias']}: {line['address']} (Suffix: {line['suffix']})")
     print(f"Shared Folder: {SHARED_FOLDER_NAME}")
     print(f"Output Directory: {centralized_folder}")
+    print(f"Archive Directory: {archive_base_folder}")
+    print(f"Shift Duration: {shift_duration} hours")
     print("=" * 70)
     
     # Start the monitoring
